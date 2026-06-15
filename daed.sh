@@ -9,14 +9,18 @@ DAED_RELEASES_PAGE="https://github.com/$DAED_REPO/releases"
 LUCI_DAED_REPO="QiuSimons/luci-app-daed"
 LUCI_DAED_API="https://api.github.com/repos/$LUCI_DAED_REPO/releases/latest"
 LUCI_DAED_RELEASES_PAGE="https://github.com/$LUCI_DAED_REPO/releases/latest"
+BTF_REPO_BASE="https://opkg.cooluc.com"
 DAED_BIN="/usr/bin/daed"
 DAED_SHARE="/usr/share/daed"
 DAED_CONFIG="/etc/daed"
 DAED_INIT="/etc/init.d/daed"
 START_AFTER_INSTALL="0"
 SKIP_LUCI="0"
+SKIP_BTF_INSTALL="0"
+ALLOW_BTF_SERIES_MISMATCH="0"
 FORCE_PKG_UPDATE="1"
 LOCK_ACQUIRED="0"
+BTF_SOURCE=""
 
 cleanup() {
     if [ "$LOCK_ACQUIRED" = "1" ]; then
@@ -69,6 +73,9 @@ usage() {
   --start             安装后启用并启动 daed 服务（默认保持停用）
   --skip-start        兼容旧参数；安装后保持停用
   --skip-luci         跳过安装 LuCI DAED 界面
+  --skip-btf-install  缺少 BTF 时不尝试安装外置 vmlinux-btf
+  --allow-btf-series-mismatch
+                      允许自动安装同一主次版本的 vmlinux-btf
   --skip-pkg-update   跳过 opkg update / apk update
   -h, --help          显示帮助
 EOF_USAGE
@@ -85,6 +92,12 @@ parse_args() {
                 ;;
             --skip-luci)
                 SKIP_LUCI="1"
+                ;;
+            --skip-btf-install)
+                SKIP_BTF_INSTALL="1"
+                ;;
+            --allow-btf-series-mismatch)
+                ALLOW_BTF_SERIES_MISMATCH="1"
                 ;;
             --skip-pkg-update)
                 FORCE_PKG_UPDATE="0"
@@ -304,14 +317,104 @@ version_ge_5_17() {
     [ "$MAJOR" -gt 5 ] || { [ "$MAJOR" -eq 5 ] && [ "$MINOR" -ge 17 ]; }
 }
 
+has_btf() {
+    if [ -r /sys/kernel/btf/vmlinux ]; then
+        BTF_SOURCE="integrated"
+        return 0
+    fi
+
+    if [ -r /usr/lib/debug/boot/vmlinux ] ||
+        [ -r "/usr/lib/debug/boot/vmlinux-$(uname -r)" ]; then
+        BTF_SOURCE="external"
+        return 0
+    fi
+
+    return 1
+}
+
+confirm_btf_series_mismatch() {
+    CURRENT_KERNEL="$1"
+    BTF_VERSION="$2"
+
+    if [ "$ALLOW_BTF_SERIES_MISMATCH" = "1" ]; then
+        return 0
+    fi
+
+    [ -r /dev/tty ] || return 1
+    warn "未找到与内核 $CURRENT_KERNEL 完全一致的 vmlinux-btf"
+    warn "找到同一主次版本的 vmlinux-btf $BTF_VERSION；上游允许尝试，但仍可能因类型或补丁差异无法运行"
+    printf '是否继续安装该 BTF 包？[y/N]: ' >/dev/tty
+    read -r ANSWER </dev/tty || return 1
+    case "$ANSWER" in
+        y|Y|yes|YES|Yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+install_external_btf() {
+    PKG_MGR="$1"
+    CURRENT_KERNEL="$(uname -r)"
+    KERNEL_SERIES="$(printf '%s' "$CURRENT_KERNEL" | awk -F. '{print $1 "." $2}')"
+    OPENWRT_SERIES="$(printf '%s' "${DISTRIB_RELEASE:-}" | awk -F. '{print $1 "." $2}')"
+    OPENWRT_ARCH="${DISTRIB_ARCH:-}"
+
+    [ "$SKIP_BTF_INSTALL" = "0" ] || return 1
+    [ "$PKG_MGR" = "apk" ] || {
+        warn "自动安装外置 vmlinux-btf 当前仅支持 OpenWrt 25.12+ 的 apk 环境"
+        return 1
+    }
+    [ -n "$OPENWRT_SERIES" ] && [ -n "$OPENWRT_ARCH" ] || return 1
+    case "$OPENWRT_SERIES:$OPENWRT_ARCH" in
+        *[!0-9.a-zA-Z_:-]*) return 1 ;;
+    esac
+
+    BTF_DIR_URL="$BTF_REPO_BASE/openwrt-$OPENWRT_SERIES/$OPENWRT_ARCH"
+    BTF_INDEX="$TMP_ROOT/vmlinux-btf-index.html"
+    log "当前固件未内置 BTF，查找外置 vmlinux-btf"
+    download_url "$BTF_DIR_URL/" "$BTF_INDEX" || {
+        warn "无法访问 vmlinux-btf 软件源: $BTF_DIR_URL"
+        return 1
+    }
+
+    BTF_NAME="$(grep -o "vmlinux-btf-${CURRENT_KERNEL}\\.apk" "$BTF_INDEX" | head -n1 || true)"
+    if [ -z "$BTF_NAME" ]; then
+        BTF_NAME="$(grep -o "vmlinux-btf-${KERNEL_SERIES}\\.[0-9][0-9.]*\\.apk" "$BTF_INDEX" | head -n1 || true)"
+        [ -n "$BTF_NAME" ] || {
+            warn "软件源没有适用于 $OPENWRT_ARCH、内核 $CURRENT_KERNEL 的 vmlinux-btf"
+            return 1
+        }
+        BTF_VERSION="${BTF_NAME#vmlinux-btf-}"
+        BTF_VERSION="${BTF_VERSION%.apk}"
+        confirm_btf_series_mismatch "$CURRENT_KERNEL" "$BTF_VERSION" || {
+            warn "已取消安装版本不完全一致的 vmlinux-btf"
+            return 1
+        }
+    fi
+
+    BTF_PKG="$TMP_ROOT/$BTF_NAME"
+    warn "外置 BTF 将从第三方软件源 opkg.cooluc.com 下载"
+    log "下载外置 BTF: $BTF_NAME"
+    download_url "$BTF_DIR_URL/$BTF_NAME" "$BTF_PKG" || {
+        warn "下载外置 vmlinux-btf 失败"
+        return 1
+    }
+    log "安装外置 BTF: $BTF_NAME"
+    apk add --allow-untrusted "$BTF_PKG" || {
+        warn "安装外置 vmlinux-btf 失败"
+        return 1
+    }
+    has_btf || {
+        warn "vmlinux-btf 安装后仍未找到 /usr/lib/debug/boot/vmlinux"
+        return 1
+    }
+    log "外置 BTF 安装完成"
+}
+
 check_kernel_support() {
+    PKG_MGR="$1"
     version_ge_5_17 || die "dae 需要 Linux 5.17+ 内核，当前内核为 $(uname -r)"
 
-    if [ ! -r /sys/kernel/btf/vmlinux ] &&
-        [ ! -r /usr/lib/debug/boot/vmlinux ] &&
-        [ ! -r "/usr/lib/debug/boot/vmlinux-$(uname -r)" ]; then
-        die "当前固件（OpenWrt ${DISTRIB_RELEASE:-unknown}，内核 $(uname -r)）未提供 daed 必需的 BTF，无法运行 daed。仅安装插件无法补齐该内核能力；请使用已开启 eBPF/BTF 的固件，或自行构建并安装与当前固件、架构和内核严格匹配的 vmlinux-btf"
-    fi
+    has_btf || install_external_btf "$PKG_MGR" || die "当前固件（OpenWrt ${DISTRIB_RELEASE:-unknown}，架构 ${DISTRIB_ARCH:-unknown}，内核 $(uname -r)）未提供可用 BTF，无法运行 daed。请使用已开启 eBPF/BTF 的固件，或安装匹配的 vmlinux-btf"
 
     CONFIG_FILE="$TMP_ROOT/kernel.config"
     if [ -r /proc/config.gz ] && command -v zcat >/dev/null 2>&1; then
@@ -338,21 +441,24 @@ check_kernel_support() {
         CONFIG_NET_EGRESS \
         CONFIG_NET_CLS_ACT \
         CONFIG_BPF_STREAM_PARSER \
-        CONFIG_DEBUG_INFO \
-        CONFIG_DEBUG_INFO_BTF \
         CONFIG_KPROBE_EVENTS \
         CONFIG_BPF_EVENTS
     do
         grep -q "^${OPTION}=y$" "$CONFIG_FILE" || MISSING="$MISSING ${OPTION}"
     done
 
+    if [ "$BTF_SOURCE" = "integrated" ]; then
+        for OPTION in CONFIG_DEBUG_INFO CONFIG_DEBUG_INFO_BTF; do
+            grep -q "^${OPTION}=y$" "$CONFIG_FILE" || MISSING="$MISSING ${OPTION}"
+        done
+        if grep -q '^CONFIG_DEBUG_INFO_REDUCED=y$' "$CONFIG_FILE"; then
+            MISSING="$MISSING # CONFIG_DEBUG_INFO_REDUCED is not set"
+        fi
+    fi
+
     for OPTION in CONFIG_NET_SCH_INGRESS CONFIG_NET_CLS_BPF; do
         grep -Eq "^${OPTION}=(y|m)$" "$CONFIG_FILE" || MISSING="$MISSING ${OPTION}"
     done
-
-    if grep -q '^CONFIG_DEBUG_INFO_REDUCED=y$' "$CONFIG_FILE"; then
-        MISSING="$MISSING # CONFIG_DEBUG_INFO_REDUCED is not set"
-    fi
 
     [ -z "$MISSING" ] || die "当前内核缺少 daed 所需能力:$MISSING"
 }
@@ -540,12 +646,12 @@ main() {
         die "缺少 curl 或 wget，无法下载 daed"
     fi
 
-    log "检查 daed 运行环境"
-    check_kernel_support
-    check_disk_space
-
     ASSET_ARCH="$(detect_asset_arch)"
     PKG_MGR="$(detect_pkg_mgr)"
+    log "检查 daed 运行环境"
+    check_kernel_support "$PKG_MGR"
+    check_disk_space
+
     LATEST_TAG="$(find_latest_tag)"
     OLD_VER="$("$DAED_BIN" --version 2>/dev/null | awk '{print $NF}' | head -n1 || true)"
 
@@ -568,7 +674,7 @@ main() {
         "$DAED_INIT" restart || die "daed 服务启动失败，可执行 logread -e daed 查看日志"
         log "daed 服务已启用并启动"
     else
-        log "daed 安装完成，LuCI“启用”选项默认未勾选；请在“服务 -> DAED”中手动启用"
+        log "daed 安装完成，LuCI '启用' 选项默认未勾选；请在 '服务 -> DAED' 中手动启用"
     fi
 
     warn "daed 依赖 eBPF/BTF；部分 OpenWrt 固件即使内核版本满足，也可能因内核裁剪而无法运行"
