@@ -310,7 +310,7 @@ check_kernel_support() {
     if [ ! -r /sys/kernel/btf/vmlinux ] &&
         [ ! -r /usr/lib/debug/boot/vmlinux ] &&
         [ ! -r "/usr/lib/debug/boot/vmlinux-$(uname -r)" ]; then
-        die "当前内核未提供 BTF。OpenWrt 官方原版固件通常不满足 daed 运行要求，请使用已开启 eBPF/BTF 的定制固件，或安装与当前内核严格匹配的 vmlinux-btf"
+        die "当前固件（OpenWrt ${DISTRIB_RELEASE:-unknown}，内核 $(uname -r)）未提供 daed 必需的 BTF，无法运行 daed。仅安装插件无法补齐该内核能力；请使用已开启 eBPF/BTF 的固件，或自行构建并安装与当前固件、架构和内核严格匹配的 vmlinux-btf"
     fi
 
     CONFIG_FILE="$TMP_ROOT/kernel.config"
