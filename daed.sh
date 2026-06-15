@@ -421,7 +421,7 @@ start_service() {
     config_load "$CONF"
 
     local enabled listen_addr log_maxbackups log_maxsize
-    config_get_bool enabled "config" "enabled" "1"
+    config_get_bool enabled "config" "enabled" "0"
     [ "$enabled" -eq 1 ] || return 1
     config_get listen_addr "config" "listen_addr" "0.0.0.0:2023"
     config_get log_maxbackups "config" "log_maxbackups" "1"
@@ -455,7 +455,7 @@ ensure_luci_config() {
     if [ ! -f /etc/config/daed ]; then
         cat > /etc/config/daed <<'EOF_CONFIG'
 config daed 'config'
-	option enabled '1'
+	option enabled '0'
 	option listen_addr '0.0.0.0:2023'
 	option log_maxbackups '1'
 	option log_maxsize '5'
@@ -556,13 +556,13 @@ main() {
     log "安装后版本: ${NEW_VER:-unknown}"
 
     if [ "$START_AFTER_INSTALL" = "1" ]; then
+        uci set daed.config.enabled='1'
+        uci commit daed
         "$DAED_INIT" enable
         "$DAED_INIT" restart || die "daed 服务启动失败，可执行 logread -e daed 查看日志"
         log "daed 服务已启用并启动"
     else
-        "$DAED_INIT" stop >/dev/null 2>&1 || true
-        "$DAED_INIT" disable >/dev/null 2>&1 || true
-        log "daed 安装完成，服务保持停用；请在 LuCI“服务 -> DAED”中手动启动"
+        log "daed 安装完成，LuCI“启用”选项默认未勾选；请在“服务 -> DAED”中手动启用"
     fi
 
     warn "daed 依赖 eBPF/BTF；部分 OpenWrt 固件即使内核版本满足，也可能因内核裁剪而无法运行"

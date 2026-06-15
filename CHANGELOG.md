@@ -6,7 +6,7 @@
 - 菜单、更新检测和安全卸载新增 daed 入口；安装前检查架构、Linux 5.17+、eBPF/BTF 内核能力及磁盘空间。
 - daed 最新版本检测仅匹配正式 `v*` Release，避免被同仓库的 `dae-lang-core` 等组件 Release 干扰。
 - daed 默认集成 `QiuSimons/luci-app-daed` 与中文包，安装后可从 LuCI“服务 → DAED”启停、查看日志和打开仪表板；OpenWrt 24.10 / 25.12 分别自动匹配 `ipk` / `apk`。
-- daed 安装或更新完成后默认保持停用并取消开机自启，等待用户从 LuCI 手动启动；需要自动启动时可显式传入 `--start`。
+- daed 全新安装时 LuCI“启用”选项默认不勾选，等待用户手动启用；安装结束时不再额外停止或禁用服务，需要自动启用并启动时可显式传入 `--start`。
 
 ## v1.2.5
 
